@@ -39,7 +39,7 @@ NeuroTrade AI is a local desktop application that:
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/NeuroTradeAI.git
+git clone https://github.com/yohan0223/NeuroTradeAI
 
 # Navigate to folder
 cd NeuroTradeAI
