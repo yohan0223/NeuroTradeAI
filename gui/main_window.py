@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QHBoxLayout,
+    QSpinBox,
 )
 from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime
@@ -20,6 +21,8 @@ from datetime import datetime
 from gui.workers import StartupCheckWorker
 from gui.widgets.candlestick_chart import CandlestickChart
 from gui.chart_data_worker import ChartDataWorker
+from gui.data_worker import DataWorker
+from core.indicators import IndicatorEngine
 from config import DEFAULT_SYMBOL, ALLOWED_SYMBOLS, ALLOWED_TIMEFRAMES
 
 
@@ -34,8 +37,11 @@ class MainWindow(QMainWindow):
 
         self._worker = None
         self._chart_worker = None
+        self._data_worker = None
         self._initial_chart_requested = False
         self._chart_request_source = "manual"
+        self._indicator_df = None
+        self._indicator_meta = None
 
         self._chart_timer = QTimer(self)
         self._chart_timer.setInterval(10000)
@@ -57,6 +63,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._create_chart_tab(), "Chart")
+        self.tabs.addTab(self._create_data_tab(), "Data")
         self.tabs.addTab(self._create_logs_tab(), "Logs")
         self.tabs.addTab(self._create_about_tab(), "About")
 
@@ -69,7 +76,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        # System status group
         status_group = QGroupBox("System Status")
         status_grid = QGridLayout(status_group)
         status_grid.setHorizontalSpacing(18)
@@ -106,7 +112,6 @@ class MainWindow(QMainWindow):
         status_grid.setColumnStretch(1, 1)
         layout.addWidget(status_group)
 
-        # Trading placeholder group
         trading_group = QGroupBox("Trading")
         trading_layout = QVBoxLayout(trading_group)
         trading_label = QLabel("Trading controls will be added in a future part.")
@@ -114,10 +119,9 @@ class MainWindow(QMainWindow):
         trading_layout.addWidget(trading_label)
         layout.addWidget(trading_group)
 
-        # Chart placeholder group
         chart_group = QGroupBox("Chart")
         chart_layout = QVBoxLayout(chart_group)
-        chart_label = QLabel("The live candlestick chart is now available in the Chart tab.")
+        chart_label = QLabel("The live candlestick chart is available in the Chart tab.")
         chart_label.setStyleSheet("color: #9aa0a6;")
         chart_layout.addWidget(chart_label)
         layout.addWidget(chart_group)
@@ -174,6 +178,92 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _create_data_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        history_group = QGroupBox("Candle History")
+        history_layout = QGridLayout(history_group)
+
+        history_layout.addWidget(QLabel("Symbol"), 0, 0)
+        self.data_symbol_combo = QComboBox()
+        self.data_symbol_combo.addItems(ALLOWED_SYMBOLS)
+        self.data_symbol_combo.setCurrentText(DEFAULT_SYMBOL)
+        self.data_symbol_combo.setEnabled(False)
+        history_layout.addWidget(self.data_symbol_combo, 0, 1)
+
+        history_layout.addWidget(QLabel("Timeframe"), 0, 2)
+        self.data_timeframe_combo = QComboBox()
+        self.data_timeframe_combo.addItems(ALLOWED_TIMEFRAMES)
+        self.data_timeframe_combo.setCurrentText("1m")
+        self.data_timeframe_combo.setEnabled(False)
+        history_layout.addWidget(self.data_timeframe_combo, 0, 3)
+
+        history_layout.addWidget(QLabel("Bars"), 1, 0)
+        self.bars_spin = QSpinBox()
+        self.bars_spin.setRange(50, 5000)
+        self.bars_spin.setSingleStep(50)
+        self.bars_spin.setValue(500)
+        self.bars_spin.setEnabled(False)
+        history_layout.addWidget(self.bars_spin, 1, 1)
+
+        self.sync_button = QPushButton("Sync MT5 History")
+        self.sync_button.setEnabled(False)
+        self.sync_button.clicked.connect(lambda: self.request_data_work("sync"))
+        history_layout.addWidget(self.sync_button, 1, 2)
+
+        self.load_db_button = QPushButton("Load From SQLite")
+        self.load_db_button.setEnabled(False)
+        self.load_db_button.clicked.connect(lambda: self.request_data_work("load"))
+        history_layout.addWidget(self.load_db_button, 1, 3)
+
+        self.data_status_label = QLabel("No history loaded yet.")
+        self.data_status_label.setStyleSheet("color: #9aa0a6;")
+        history_layout.addWidget(self.data_status_label, 2, 0, 1, 4)
+
+        layout.addWidget(history_group)
+
+        overlay_group = QGroupBox("Chart Overlays")
+        overlay_layout = QHBoxLayout(overlay_group)
+
+        self.sma_checkbox = QCheckBox("SMA 20")
+        self.sma_checkbox.setChecked(True)
+        self.ema_checkbox = QCheckBox("EMA 50")
+        self.ema_checkbox.setChecked(True)
+        self.bb_checkbox = QCheckBox("Bollinger 20 / 2")
+        self.bb_checkbox.setChecked(False)
+
+        for checkbox in (self.sma_checkbox, self.ema_checkbox, self.bb_checkbox):
+            checkbox.setEnabled(False)
+            checkbox.toggled.connect(self._apply_chart_overlays)
+            overlay_layout.addWidget(checkbox)
+
+        overlay_layout.addStretch()
+        layout.addWidget(overlay_group)
+
+        readout_group = QGroupBox("Latest Candle Indicators")
+        readout_layout = QVBoxLayout(readout_group)
+
+        self.indicator_output = QPlainTextEdit()
+        self.indicator_output.setReadOnly(True)
+        self.indicator_output.setMaximumBlockCount(20)
+        self.indicator_output.setPlainText("No indicator data loaded.")
+        readout_layout.addWidget(self.indicator_output)
+
+        layout.addWidget(readout_group, stretch=1)
+
+        note = QLabel(
+            "Sync pauses live chart updates so overlays stay visible. "
+            "Re-enable Live on the Chart tab to resume plain candle refresh."
+        )
+        note.setStyleSheet("color: #9aa0a6;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        return tab
+
     def _create_logs_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -191,8 +281,9 @@ class MainWindow(QMainWindow):
         tab.setOpenExternalLinks(False)
         tab.setHtml(
             "<h2>NeuroTrade AI</h2>"
-            "<p>Personal-use self-learning trading system skeleton.</p>"
-            "<p>Part 3 adds a live candlestick chart. No trading operations are executed.</p>"
+            "<p>Personal-use self-learning trading system.</p>"
+            "<p>Part 4 adds candle history storage and pandas/numpy indicators. "
+            "No trading operations or trading signals are executed.</p>"
             "<p>DEMO only.</p>"
         )
         return tab
@@ -235,7 +326,6 @@ class MainWindow(QMainWindow):
             "checking": "#f1c40f",
             "neutral": "#d5d8dc",
         }
-
         color = colors.get(state, colors["neutral"])
         label.setText(text)
         label.setStyleSheet(f"color: {color}; font-weight: bold;")
@@ -267,9 +357,7 @@ class MainWindow(QMainWindow):
         self._set_label_state(self.db_status_label, "DB: Checking", "checking")
         self._set_label_state(self.mt5_status_label, "MT5: Checking", "checking")
         self._set_label_state(
-            self.symbol_status_label,
-            f"Symbol: {DEFAULT_SYMBOL}",
-            "checking",
+            self.symbol_status_label, f"Symbol: {DEFAULT_SYMBOL}", "checking"
         )
 
     def _on_system_status(self, status):
@@ -298,22 +386,15 @@ class MainWindow(QMainWindow):
         self._set_label_state(self.volume_max_value, volume_max, "neutral")
 
         self._set_label_state(self.db_status_label, f"DB: {db_status}", db_state)
-        self._set_label_state(
-            self.mt5_status_label,
-            f"MT5: {mt5_status}",
-            mt5_state,
-        )
-        self._set_label_state(
-            self.symbol_status_label,
-            f"Symbol: {symbol}",
-            symbol_state,
-        )
+        self._set_label_state(self.mt5_status_label, f"MT5: {mt5_status}", mt5_state)
+        self._set_label_state(self.symbol_status_label, f"Symbol: {symbol}", symbol_state)
 
     def _on_checks_finished(self):
         self.append_log("System checks finished.")
         self.statusBar().showMessage("Ready", 5000)
 
         self._enable_chart_controls()
+        self._enable_data_controls(True)
 
         if not self._initial_chart_requested:
             self._initial_chart_requested = True
@@ -328,10 +409,27 @@ class MainWindow(QMainWindow):
         self.load_chart_button.setEnabled(True)
         self.live_chart_checkbox.setEnabled(True)
 
+    def _enable_data_controls(self, enabled: bool):
+        self.data_symbol_combo.setEnabled(enabled)
+        self.data_timeframe_combo.setEnabled(enabled)
+        self.bars_spin.setEnabled(enabled)
+        self.sync_button.setEnabled(enabled)
+        self.load_db_button.setEnabled(enabled)
+
+        overlay_enabled = enabled and self._indicator_df is not None
+        self.sma_checkbox.setEnabled(overlay_enabled)
+        self.ema_checkbox.setEnabled(overlay_enabled)
+        self.bb_checkbox.setEnabled(overlay_enabled)
+
     def request_chart_data(self, source: str = "manual"):
         if self._chart_worker is not None and self._chart_worker.isRunning():
             if source == "manual":
                 self.append_log("Chart refresh already in progress.")
+            return
+
+        if self._data_worker is not None and self._data_worker.isRunning():
+            if source == "manual":
+                self.append_log("Data sync in progress. Please wait.")
             return
 
         self._chart_request_source = source
@@ -359,6 +457,10 @@ class MainWindow(QMainWindow):
         self._chart_worker.start()
 
     def _on_chart_data_ready(self, data, meta):
+        # Plain chart refresh replaces any previous indicator overlay view.
+        self._indicator_df = None
+        self._indicator_meta = None
+        self.chart_widget.set_overlays([])
         self.chart_widget.set_data(data, meta)
 
         status_text = (
@@ -381,7 +483,10 @@ class MainWindow(QMainWindow):
 
     def _on_live_chart_toggled(self, checked: bool):
         if checked:
-            self.append_log("Live chart updates enabled.")
+            self._indicator_df = None
+            self._indicator_meta = None
+            self.chart_widget.set_overlays([])
+            self.append_log("Live chart updates enabled. Indicator overlays cleared.")
             self._chart_timer.start()
             self.request_chart_data("manual")
         else:
@@ -397,6 +502,103 @@ class MainWindow(QMainWindow):
 
         self.request_chart_data("timer")
 
+    def request_data_work(self, mode: str):
+        if self._data_worker is not None and self._data_worker.isRunning():
+            self.append_log("Data operation already in progress.")
+            return
+
+        if self._chart_worker is not None and self._chart_worker.isRunning():
+            self.append_log("Chart refresh in progress. Please wait.")
+            return
+
+        symbol = self.data_symbol_combo.currentText().strip()
+        timeframe = self.data_timeframe_combo.currentText().strip()
+        limit = int(self.bars_spin.value())
+
+        self._enable_data_controls(False)
+        self.data_status_label.setStyleSheet("color: #f1c40f;")
+        self.data_status_label.setText(f"Processing {symbol} {timeframe}...")
+
+        self._data_worker = DataWorker(
+            symbol=symbol,
+            timeframe=timeframe,
+            mode=mode,
+            limit=limit,
+        )
+        self._data_worker.log.connect(self.append_log)
+        self._data_worker.data_ready.connect(self._on_data_ready)
+        self._data_worker.error.connect(self._on_data_error)
+        self._data_worker.start()
+
+    def _on_data_ready(self, data, meta):
+        self._indicator_df = data
+        self._indicator_meta = meta
+
+        self.indicator_output.setPlainText(IndicatorEngine.format_summary(data))
+
+        # Show the loaded history on the Chart tab with overlays.
+        self.chart_widget.set_data(data, meta)
+        self._apply_chart_overlays()
+
+        chart_status = (
+            f"{meta.get('symbol', '')} {meta.get('timeframe', '')} | "
+            f"{meta.get('rows', 0)} candles | source: {meta.get('source', '')}"
+        )
+        self.chart_status_label.setStyleSheet("color: #2ecc71;")
+        self.chart_status_label.setText(chart_status)
+
+        self.data_status_label.setStyleSheet("color: #2ecc71;")
+        self.data_status_label.setText(
+            f"{meta.get('source', '')} | {meta.get('rows', 0)} candles | "
+            f"{meta.get('stored_rows', 0)} stored in SQLite | "
+            f"last candle {meta.get('last_time', '')}"
+        )
+
+        # Prevent the live timer from immediately replacing overlays.
+        if self.live_chart_checkbox.isChecked():
+            self.live_chart_checkbox.blockSignals(True)
+            self.live_chart_checkbox.setChecked(False)
+            self.live_chart_checkbox.blockSignals(False)
+            self._chart_timer.stop()
+            self.append_log("Live chart paused to preserve indicator overlays.")
+
+        self._enable_data_controls(True)
+
+    def _on_data_error(self, message: str):
+        self.data_status_label.setStyleSheet("color: #e74c3c;")
+        self.data_status_label.setText("Data operation failed. Check Logs.")
+        self.append_log(message)
+        self._enable_data_controls(True)
+
+    def _apply_chart_overlays(self):
+        if self._indicator_df is None:
+            return
+
+        df = self._indicator_df
+        overlays = []
+
+        if self.sma_checkbox.isChecked():
+            overlays.append(
+                {"name": "SMA 20", "color": "#f1c40f", "values": df["sma_20"].tolist()}
+            )
+
+        if self.ema_checkbox.isChecked():
+            overlays.append(
+                {"name": "EMA 50", "color": "#5dade2", "values": df["ema_50"].tolist()}
+            )
+
+        if self.bb_checkbox.isChecked():
+            for column, color in (
+                ("bb_upper", "#af7ac5"),
+                ("bb_middle", "#7f8c8d"),
+                ("bb_lower", "#af7ac5"),
+            ):
+                overlays.append(
+                    {"name": column, "color": color, "values": df[column].tolist()}
+                )
+
+        self.chart_widget.set_overlays(overlays)
+
     def append_log(self, message: str):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_text.appendPlainText(f"[{timestamp}] {message}")
@@ -407,15 +609,17 @@ class MainWindow(QMainWindow):
             "NeuroTrade AI",
             "<h3>NeuroTrade AI</h3>"
             "<p>Personal-use self-learning trading system.</p>"
-            "<p>Part 3: Live candlestick chart. No trading operations are executed.</p>"
+            "<p>Part 4: candle history and indicators. "
+            "No trading operations or trading signals are executed.</p>"
             "<p>DEMO only.</p>",
         )
 
     def closeEvent(self, event):
         self._chart_timer.stop()
 
-        # Wait briefly for background workers to avoid signals being
-        # delivered to a window that is being destroyed.
+        if self._data_worker is not None and self._data_worker.isRunning():
+            self._data_worker.wait(3000)
+
         if self._chart_worker is not None and self._chart_worker.isRunning():
             self._chart_worker.wait(3000)
 

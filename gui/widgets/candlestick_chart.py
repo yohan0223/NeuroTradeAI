@@ -5,11 +5,13 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 class CandlestickChart(QWidget):
     """
-    Lightweight candlestick chart widget drawn with PyQt6 QPainter.
+    Lightweight candlestick chart drawn with PyQt6 QPainter.
 
-    This widget does not use external chart libraries.
-    It renders candles from a pandas DataFrame with columns:
+    Renders a pandas DataFrame with columns:
     time, open, high, low, close.
+
+    Optional indicator overlays are supplied as a list of dicts:
+    {"name": str, "color": str, "values": sequence of float/NaN}
     """
 
     def __init__(self, parent=None):
@@ -17,17 +19,12 @@ class CandlestickChart(QWidget):
 
         self._data = None
         self._meta = {}
+        self._overlays = []
 
         self.setMinimumHeight(320)
         self.setMinimumWidth(600)
 
     def set_data(self, data, meta=None):
-        """
-        Set candle data and optional metadata.
-
-        data: pandas DataFrame with columns time/open/high/low/close.
-        meta: dict with optional display metadata.
-        """
         if data is None or len(data) == 0:
             self._data = None
         else:
@@ -36,9 +33,15 @@ class CandlestickChart(QWidget):
         self._meta = meta or {}
         self.update()
 
+    def set_overlays(self, overlays):
+        """Set indicator overlays. Values must align with candle rows."""
+        self._overlays = overlays or []
+        self.update()
+
     def clear(self):
         self._data = None
         self._meta = {}
+        self._overlays = []
         self.update()
 
     def paintEvent(self, event):
@@ -48,8 +51,7 @@ class CandlestickChart(QWidget):
 
         if self._data is None or len(self._data) == 0:
             painter.setPen(QColor("#9aa0a6"))
-            font = QFont("Segoe UI", 12)
-            painter.setFont(font)
+            painter.setFont(QFont("Segoe UI", 12))
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
@@ -74,6 +76,19 @@ class CandlestickChart(QWidget):
         low = float(df["low"].min())
         high = float(df["high"].max())
 
+        # Include overlay values in the vertical scale when available.
+        for overlay in self._overlays:
+            values = overlay.get("values", [])
+            valid = [
+                float(value)
+                for value in values[:len(df)]
+                if value is not None
+                and str(value) != "nan"
+            ]
+            if valid:
+                low = min(low, min(valid))
+                high = max(high, max(valid))
+
         if high == low:
             high += 1.0
             low -= 1.0
@@ -86,7 +101,6 @@ class CandlestickChart(QWidget):
         n = len(df)
         slot = plot.width() / n
         candle_width = max(1, int(slot * 0.65))
-
         decimals = int(self._meta.get("digits", 2))
 
         def y(price: float) -> float:
@@ -95,42 +109,29 @@ class CandlestickChart(QWidget):
         def x(index: int) -> float:
             return plot.left() + slot * index + slot / 2.0
 
-        # Title
         if self._meta:
-            title_font = QFont("Segoe UI", 9)
-            title_font.setBold(True)
-            painter.setFont(title_font)
+            painter.setFont(QFont("Segoe UI", 9))
             painter.setPen(QColor("#d5d8dc"))
-
             title = (
                 f"{self._meta.get('symbol', '')} "
                 f"{self._meta.get('timeframe', '')} | "
                 f"Candles: {self._meta.get('rows', 0)} | "
                 f"Updated: {self._meta.get('updated_at', '')}"
             )
-
             painter.drawText(
                 QRectF(left, 2, self.width() - left - right, top - 4),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 title,
             )
 
-        # Horizontal grid and price labels
-        grid_font = QFont("Segoe UI", 8)
-        painter.setFont(grid_font)
-
+        painter.setFont(QFont("Segoe UI", 8))
         grid_steps = 6
         for i in range(grid_steps + 1):
             price = price_min + price_span * i / grid_steps
             yy = y(price)
 
             painter.setPen(QPen(QColor("#2a2f36"), 1))
-            painter.drawLine(
-                int(plot.left()),
-                int(yy),
-                int(plot.right()),
-                int(yy),
-            )
+            painter.drawLine(int(plot.left()), int(yy), int(plot.right()), int(yy))
 
             painter.setPen(QColor("#9aa0a6"))
             painter.drawText(
@@ -139,7 +140,6 @@ class CandlestickChart(QWidget):
                 f"{price:.{decimals}f}",
             )
 
-        # Time labels
         label_count = min(6, n)
         if label_count > 0:
             step = max(1, n // label_count)
@@ -148,16 +148,10 @@ class CandlestickChart(QWidget):
 
             for i in range(0, n, step):
                 xx = x(i)
-                ts = df["time"].iloc[i]
-                label = ts.strftime(time_format)
+                label = df["time"].iloc[i].strftime(time_format)
 
                 painter.setPen(QPen(QColor("#2a2f36"), 1))
-                painter.drawLine(
-                    int(xx),
-                    int(plot.bottom()),
-                    int(xx),
-                    int(plot.bottom() + 4),
-                )
+                painter.drawLine(int(xx), int(plot.bottom()), int(xx), int(plot.bottom() + 4))
 
                 painter.setPen(QColor("#9aa0a6"))
                 painter.drawText(
@@ -166,7 +160,6 @@ class CandlestickChart(QWidget):
                     label,
                 )
 
-        # Candles
         up_color = QColor("#2ecc71")
         down_color = QColor("#e74c3c")
 
@@ -179,16 +172,9 @@ class CandlestickChart(QWidget):
             color = up_color if close_price >= open_price else down_color
             xx = x(i)
 
-            # Wick
             painter.setPen(QPen(color, 1))
-            painter.drawLine(
-                int(xx),
-                int(y(high_price)),
-                int(xx),
-                int(y(low_price)),
-            )
+            painter.drawLine(int(xx), int(y(high_price)), int(xx), int(y(low_price)))
 
-            # Body
             body_top = y(max(open_price, close_price))
             body_bottom = y(min(open_price, close_price))
             body_height = max(1, int(body_bottom - body_top))
@@ -196,25 +182,41 @@ class CandlestickChart(QWidget):
             painter.setBrush(QBrush(color))
             painter.setPen(QPen(color, 1))
             painter.drawRect(
-                QRectF(
-                    xx - candle_width / 2.0,
-                    body_top,
-                    candle_width,
-                    body_height,
-                )
+                QRectF(xx - candle_width / 2.0, body_top, candle_width, body_height)
             )
 
-        # Last close line
+        # Indicator overlays. NaN segments are skipped, never drawn as zero.
+        for overlay in self._overlays:
+            values = overlay.get("values", [])
+            color = QColor(overlay.get("color", "#f1c40f"))
+            previous = None
+
+            for i in range(min(len(values), n)):
+                try:
+                    raw_value = values[i]
+                    value = float(raw_value)
+                    is_valid = value == value  # NaN check without extra dependency
+                except (TypeError, ValueError):
+                    is_valid = False
+
+                if not is_valid:
+                    previous = None
+                    continue
+
+                current = (x(i), y(value))
+                if previous is not None:
+                    painter.setPen(QPen(color, 1))
+                    painter.drawLine(
+                        int(previous[0]), int(previous[1]),
+                        int(current[0]), int(current[1]),
+                    )
+                previous = current
+
         last_close = float(df["close"].iloc[-1])
         yy = y(last_close)
 
         painter.setPen(QPen(QColor("#f1c40f"), 1, Qt.PenStyle.DashLine))
-        painter.drawLine(
-            int(plot.left()),
-            int(yy),
-            int(plot.right()),
-            int(yy),
-        )
+        painter.drawLine(int(plot.left()), int(yy), int(plot.right()), int(yy))
 
         painter.setPen(QColor("#f1c40f"))
         painter.drawText(
