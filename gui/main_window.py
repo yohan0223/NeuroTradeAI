@@ -9,12 +9,18 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QTextBrowser,
     QMessageBox,
+    QComboBox,
+    QPushButton,
+    QCheckBox,
+    QHBoxLayout,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime
 
 from gui.workers import StartupCheckWorker
-from config import DEFAULT_SYMBOL
+from gui.widgets.candlestick_chart import CandlestickChart
+from gui.chart_data_worker import ChartDataWorker
+from config import DEFAULT_SYMBOL, ALLOWED_SYMBOLS, ALLOWED_TIMEFRAMES
 
 
 class MainWindow(QMainWindow):
@@ -27,12 +33,19 @@ class MainWindow(QMainWindow):
         self.resize(1150, 720)
 
         self._worker = None
+        self._chart_worker = None
+        self._initial_chart_requested = False
+        self._chart_request_source = "manual"
+
+        self._chart_timer = QTimer(self)
+        self._chart_timer.setInterval(10000)
+        self._chart_timer.timeout.connect(self._on_chart_timer)
 
         self._build_ui()
         self._build_menu()
         self._build_status_bar()
 
-        self.append_log("GUI skeleton initialized.")
+        self.append_log("GUI initialized.")
         self.start_system_checks()
 
     def _build_ui(self):
@@ -43,6 +56,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_dashboard_tab(), "Dashboard")
+        self.tabs.addTab(self._create_chart_tab(), "Chart")
         self.tabs.addTab(self._create_logs_tab(), "Logs")
         self.tabs.addTab(self._create_about_tab(), "About")
 
@@ -103,16 +117,61 @@ class MainWindow(QMainWindow):
         # Chart placeholder group
         chart_group = QGroupBox("Chart")
         chart_layout = QVBoxLayout(chart_group)
-        chart_placeholder = QLabel("XAUUSD chart placeholder")
-        chart_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chart_placeholder.setMinimumHeight(240)
-        chart_placeholder.setStyleSheet(
-            "color: #9aa0a6; border: 1px dashed #3a4048; background-color: #0d1013;"
-        )
-        chart_layout.addWidget(chart_placeholder)
+        chart_label = QLabel("The live candlestick chart is now available in the Chart tab.")
+        chart_label.setStyleSheet("color: #9aa0a6;")
+        chart_layout.addWidget(chart_label)
         layout.addWidget(chart_group)
 
         layout.addStretch()
+        return tab
+
+    def _create_chart_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(8)
+
+        controls_layout.addWidget(QLabel("Symbol"))
+        self.symbol_combo = QComboBox()
+        self.symbol_combo.addItems(ALLOWED_SYMBOLS)
+        self.symbol_combo.setCurrentText(DEFAULT_SYMBOL)
+        self.symbol_combo.setEnabled(False)
+        controls_layout.addWidget(self.symbol_combo)
+
+        controls_layout.addWidget(QLabel("Timeframe"))
+        self.timeframe_combo = QComboBox()
+        self.timeframe_combo.addItems(ALLOWED_TIMEFRAMES)
+        self.timeframe_combo.setCurrentText("1m")
+        self.timeframe_combo.setEnabled(False)
+        controls_layout.addWidget(self.timeframe_combo)
+
+        self.load_chart_button = QPushButton("Load Chart")
+        self.load_chart_button.setEnabled(False)
+        self.load_chart_button.clicked.connect(
+            lambda: self.request_chart_data("manual")
+        )
+        controls_layout.addWidget(self.load_chart_button)
+
+        self.live_chart_checkbox = QCheckBox("Live")
+        self.live_chart_checkbox.setChecked(True)
+        self.live_chart_checkbox.setEnabled(False)
+        self.live_chart_checkbox.toggled.connect(self._on_live_chart_toggled)
+        controls_layout.addWidget(self.live_chart_checkbox)
+
+        controls_layout.addStretch()
+
+        self.chart_status_label = QLabel("Chart not loaded.")
+        self.chart_status_label.setStyleSheet("color: #9aa0a6;")
+        controls_layout.addWidget(self.chart_status_label)
+
+        self.chart_widget = CandlestickChart()
+
+        layout.addLayout(controls_layout)
+        layout.addWidget(self.chart_widget, stretch=1)
+
         return tab
 
     def _create_logs_tab(self):
@@ -133,7 +192,7 @@ class MainWindow(QMainWindow):
         tab.setHtml(
             "<h2>NeuroTrade AI</h2>"
             "<p>Personal-use self-learning trading system skeleton.</p>"
-            "<p>Part 2 provides the GUI skeleton only. No trading operations are executed.</p>"
+            "<p>Part 3 adds a live candlestick chart. No trading operations are executed.</p>"
             "<p>DEMO only.</p>"
         )
         return tab
@@ -254,6 +313,90 @@ class MainWindow(QMainWindow):
         self.append_log("System checks finished.")
         self.statusBar().showMessage("Ready", 5000)
 
+        self._enable_chart_controls()
+
+        if not self._initial_chart_requested:
+            self._initial_chart_requested = True
+            self.request_chart_data("initial")
+
+            if self.live_chart_checkbox.isChecked():
+                self._chart_timer.start()
+
+    def _enable_chart_controls(self):
+        self.symbol_combo.setEnabled(True)
+        self.timeframe_combo.setEnabled(True)
+        self.load_chart_button.setEnabled(True)
+        self.live_chart_checkbox.setEnabled(True)
+
+    def request_chart_data(self, source: str = "manual"):
+        if self._chart_worker is not None and self._chart_worker.isRunning():
+            if source == "manual":
+                self.append_log("Chart refresh already in progress.")
+            return
+
+        self._chart_request_source = source
+
+        symbol = self.symbol_combo.currentText().strip()
+        timeframe = self.timeframe_combo.currentText().strip()
+        verbose = source != "timer"
+
+        self.chart_status_label.setStyleSheet("color: #f1c40f;")
+        self.chart_status_label.setText(f"Loading {symbol} {timeframe}...")
+
+        if verbose:
+            self.append_log(f"Requesting chart data: {symbol} {timeframe}")
+
+        self._chart_worker = ChartDataWorker(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=300,
+            verbose=verbose,
+        )
+
+        self._chart_worker.log.connect(self.append_log)
+        self._chart_worker.data_ready.connect(self._on_chart_data_ready)
+        self._chart_worker.error.connect(self._on_chart_error)
+        self._chart_worker.start()
+
+    def _on_chart_data_ready(self, data, meta):
+        self.chart_widget.set_data(data, meta)
+
+        status_text = (
+            f"{meta.get('symbol', '')} "
+            f"{meta.get('timeframe', '')} | "
+            f"{meta.get('rows', 0)} candles | "
+            f"Updated {meta.get('updated_at', '')}"
+        )
+
+        self.chart_status_label.setStyleSheet("color: #2ecc71;")
+        self.chart_status_label.setText(status_text)
+
+        if self._chart_request_source != "timer":
+            self.append_log(f"Chart data ready: {status_text}")
+
+    def _on_chart_error(self, message: str):
+        self.chart_status_label.setStyleSheet("color: #e74c3c;")
+        self.chart_status_label.setText("Chart error. Check Logs.")
+        self.append_log(message)
+
+    def _on_live_chart_toggled(self, checked: bool):
+        if checked:
+            self.append_log("Live chart updates enabled.")
+            self._chart_timer.start()
+            self.request_chart_data("manual")
+        else:
+            self._chart_timer.stop()
+            self.append_log("Live chart updates disabled.")
+
+    def _on_chart_timer(self):
+        if not self.live_chart_checkbox.isChecked():
+            return
+
+        if self._chart_worker is not None and self._chart_worker.isRunning():
+            return
+
+        self.request_chart_data("timer")
+
     def append_log(self, message: str):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_text.appendPlainText(f"[{timestamp}] {message}")
@@ -264,13 +407,18 @@ class MainWindow(QMainWindow):
             "NeuroTrade AI",
             "<h3>NeuroTrade AI</h3>"
             "<p>Personal-use self-learning trading system.</p>"
-            "<p>Part 2: GUI skeleton only. No trading operations are executed.</p>"
+            "<p>Part 3: Live candlestick chart. No trading operations are executed.</p>"
             "<p>DEMO only.</p>",
         )
 
     def closeEvent(self, event):
-        # Wait briefly for the background worker to avoid signals being
+        self._chart_timer.stop()
+
+        # Wait briefly for background workers to avoid signals being
         # delivered to a window that is being destroyed.
+        if self._chart_worker is not None and self._chart_worker.isRunning():
+            self._chart_worker.wait(3000)
+
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(3000)
 
