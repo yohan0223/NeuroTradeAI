@@ -20,6 +20,7 @@ from datetime import datetime
 
 from gui.workers import StartupCheckWorker
 from gui.widgets.candlestick_chart import CandlestickChart
+from gui.widgets.decision_panel import DecisionPanel
 from gui.chart_data_worker import ChartDataWorker
 from gui.data_worker import DataWorker
 from core.indicators import IndicatorEngine
@@ -43,6 +44,8 @@ class MainWindow(QMainWindow):
         self._indicator_df = None
         self._indicator_meta = None
 
+        self.decision_panel = DecisionPanel()
+
         self._chart_timer = QTimer(self)
         self._chart_timer.setInterval(10000)
         self._chart_timer.timeout.connect(self._on_chart_timer)
@@ -64,6 +67,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._create_dashboard_tab(), "Dashboard")
         self.tabs.addTab(self._create_chart_tab(), "Chart")
         self.tabs.addTab(self._create_data_tab(), "Data")
+        self.tabs.addTab(self._create_decision_tab(), "Decision")
         self.tabs.addTab(self._create_logs_tab(), "Logs")
         self.tabs.addTab(self._create_about_tab(), "About")
 
@@ -264,6 +268,9 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _create_decision_tab(self):
+        return self.decision_panel
+
     def _create_logs_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -282,8 +289,8 @@ class MainWindow(QMainWindow):
         tab.setHtml(
             "<h2>NeuroTrade AI</h2>"
             "<p>Personal-use self-learning trading system.</p>"
-            "<p>Part 4 adds candle history storage and pandas/numpy indicators. "
-            "No trading operations or trading signals are executed.</p>"
+            "<p>Part 5 adds a rule-based decision engine. "
+            "No trading operations are executed and no orders are sent.</p>"
             "<p>DEMO only.</p>"
         )
         return tab
@@ -540,6 +547,9 @@ class MainWindow(QMainWindow):
         self.chart_widget.set_data(data, meta)
         self._apply_chart_overlays()
 
+        # Provide the same indicator-enriched data to the Decision tab.
+        self.decision_panel.set_data(data, meta)
+
         chart_status = (
             f"{meta.get('symbol', '')} {meta.get('timeframe', '')} | "
             f"{meta.get('rows', 0)} candles | source: {meta.get('source', '')}"
@@ -609,13 +619,15 @@ class MainWindow(QMainWindow):
             "NeuroTrade AI",
             "<h3>NeuroTrade AI</h3>"
             "<p>Personal-use self-learning trading system.</p>"
-            "<p>Part 4: candle history and indicators. "
-            "No trading operations or trading signals are executed.</p>"
+            "<p>Part 5: rule-based decision engine. "
+            "No trading operations are executed and no orders are sent.</p>"
             "<p>DEMO only.</p>",
         )
 
     def closeEvent(self, event):
         self._chart_timer.stop()
+
+        self.decision_panel.wait_for_worker(3000)
 
         if self._data_worker is not None and self._data_worker.isRunning():
             self._data_worker.wait(3000)
